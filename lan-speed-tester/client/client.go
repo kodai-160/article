@@ -5,37 +5,121 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
+	"sync"
 	"time"
 )
 
-func main() {
-	serverURL := "http://localhost:8080"
+const (
+	downloadURL     = "http://localhost:8080/download"
+	uploadURL       = "http://localhost:8080/upload"
+	dataSizeMB      = 10 // データサイズ（MB）
+	numMeasurements = 5  // 測定回数
+	threads         = 4  // 並列処理のスレッド数
+)
 
+// 並列ダウンロード速度測定
+func parallelDownload(url string, threads int) float64 {
+	var wg sync.WaitGroup
+	start := time.Now()
+
+	for i := 0; i < threads; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := http.Get(url)
+			if err != nil {
+				fmt.Println("Error:", err)
+				return
+			}
+			defer resp.Body.Close()
+			io.Copy(io.Discard, resp.Body)
+		}()
+	}
+
+	wg.Wait()
+	duration := time.Since(start).Seconds()
+	totalData := float64(dataSizeMB*threads) * 8 // データ量（ビット）
+	return totalData / (duration * 1024 * 1024)  // Mbpsで返す
+}
+
+// 並列アップロード速度測定
+func parallelUpload(url string, threads int) float64 {
+	var wg sync.WaitGroup
+	start := time.Now()
+
+	data := bytes.Repeat([]byte("A"), dataSizeMB*1024*1024) // アップロード用のダミーデータ
+
+	for i := 0; i < threads; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := http.Post(url, "application/octet-stream", bytes.NewReader(data))
+			if err != nil {
+				fmt.Println("Error:", err)
+				return
+			}
+			defer resp.Body.Close()
+		}()
+	}
+
+	wg.Wait()
+	duration := time.Since(start).Seconds()
+	totalData := float64(dataSizeMB*threads) * 8 // データ量（ビット）
+	return totalData / (duration * 1024 * 1024)  // Mbpsで返す
+}
+
+// 測定結果を分析
+func analyzeSpeeds(speeds []float64) (float64, float64) {
+	sort.Float64s(speeds)
+	return calculateAverage(speeds), calculateMedian(speeds)
+}
+
+func calculateAverage(speeds []float64) float64 {
+	var total float64
+	for _, speed := range speeds {
+		total += speed
+	}
+	return total / float64(len(speeds))
+}
+
+func calculateMedian(speeds []float64) float64 {
+	mid := len(speeds) / 2
+	if len(speeds)%2 == 0 {
+		return (speeds[mid-1] + speeds[mid]) / 2
+	}
+	return speeds[mid]
+}
+
+// 視覚的に測定結果を表示
+func displayResults(testType string, speeds []float64, avg, median float64) {
+	fmt.Printf("\n===== %s Speed Test Results ======\n", testType)
+	for i, speed := range speeds {
+		fmt.Printf("Measurement %d: %.2f Mpbs\n", i+1, speed)
+	}
+	fmt.Printf("\nAverage Speed: %.2f Mpbs\n", avg)
+	fmt.Printf("Median Speed: %.2f Mbps\n", median)
+	fmt.Println("=========================================")
+}
+
+func main() {
 	// ダウンロード速度測定
 	fmt.Println("Measuring download speed...")
-	start := time.Now()
-	resp, err := http.Get(serverURL + "/download")
-	if err != nil {
-		fmt.Println("Error:", err)
-		return
+	downloadSpeeds := make([]float64, numMeasurements)
+	for i := 0; i < numMeasurements; i++ {
+		downloadSpeeds[i] = parallelDownload(downloadURL, threads)
+		fmt.Printf("Download Measurement %d: %.2f Mbps\n", i+1, downloadSpeeds[i])
 	}
-	defer resp.Body.Close()
-	bytesDownloaded, _ := io.Copy(io.Discard, resp.Body)
-	duration := time.Since(start).Seconds()
-	downloadSpeed := (float64(bytesDownloaded) * 8) / (1024 * 1024) / duration
-	fmt.Printf("Dowload Speed: %.2f Mbps\n", downloadSpeed)
+	downloadAvg, downloadMedian := analyzeSpeeds(downloadSpeeds)
+	fmt.Printf("\nDownload - Average Speed: %.2f Mbps, Median Speed: %.2f Mbps\n", downloadAvg, downloadMedian)
 
 	// アップロード速度測定
-	fmt.Println("Measuring upload speed...")
-	data := bytes.Repeat([]byte("A"), 10*1024*1024) //10MBのデータ
-	start = time.Now()
-	resp, err = http.Post(serverURL+"/upload", "application/octet-stream", bytes.NewReader(data))
-	if err != nil {
-		fmt.Println("Error:", err)
-		return
+	fmt.Println("\nMeasuring upload speed...")
+	uploadSpeeds := make([]float64, numMeasurements)
+	for i := 0; i < numMeasurements; i++ {
+		uploadSpeeds[i] = parallelUpload(uploadURL, threads)
+		fmt.Printf("Upload Measurement %d: %.2f Mbps\n", i+1, uploadSpeeds[i])
 	}
-	defer resp.Body.Close()
-	duration = time.Since(start).Seconds()
-	uploadSpeed := (float64(len(data)) * 8) / (1024 * 1024) / duration
-	fmt.Printf("Upload Speed: %.2f Mbps\n", uploadSpeed)
+	uploadAvg, uploadMedian := analyzeSpeeds(uploadSpeeds)
+	fmt.Printf("\nUpload - Average Speed: %.2f Mbps, Median Speed: %.2f Mbps\n", uploadAvg, uploadMedian)
 }
